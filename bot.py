@@ -632,6 +632,7 @@ class TicketSelect(discord.ui.Select):
                 embed_links=True,
             )
 
+        ticket_number = _next_ticket_number()
         channel_name = (
             f"ticket-{ticket_number:04d}-{config['label'].lower().replace(' ', '-')}"
         )
@@ -642,8 +643,7 @@ class TicketSelect(discord.ui.Select):
             reason=f"Ticket {config['label']} ouvert par {user}",
         )
 
-        opened_at    = datetime.now(timezone.utc)
-        ticket_number = _next_ticket_number()
+        opened_at = datetime.now(timezone.utc)
         open_tickets[channel.id] = {
             "user_id":    user.id,
             "type":       key,
