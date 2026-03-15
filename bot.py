@@ -181,10 +181,11 @@ async def generate_transcript(
         if msg.content:
             content_parts.append(f'<p>{html.escape(msg.content)}</p>')
         for emb in msg.embeds:
-            title = html.escape(emb.title or "")
-            desc  = html.escape(emb.description or "")[:300]
+            title      = html.escape(emb.title or "")
+            desc       = html.escape(emb.description or "")[:300]
+            emb_color  = f"{emb.color.value:06x}" if emb.color else "5865F2"
             content_parts.append(
-                f'<div class="embed" style="border-left:4px solid #{emb.color.value:06x if emb.color else "5865F2"}">'
+                f'<div class="embed" style="border-left:4px solid #{emb_color}">'
                 f'{"<strong>" + title + "</strong><br>" if title else ""}'
                 f'{desc}</div>'
             )
