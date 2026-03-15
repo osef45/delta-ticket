@@ -16,7 +16,8 @@ import os
 import asyncio
 import json
 import io
-from datetime import datetime, timezone
+import html
+from datetime import datetime, timezone, timedelta
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONFIGURATION
@@ -77,14 +78,16 @@ def _load_tickets() -> dict:
     try:
         with open(TICKETS_FILE, "r", encoding="utf-8") as f:
             raw = json.load(f)
-        return {
-            int(k): {
-                "user_id":   v["user_id"],
-                "type":      v["type"],
-                "opened_at": datetime.fromisoformat(v["opened_at"]),
+        result = {}
+        for k, v in raw.items():
+            result[int(k)] = {
+                "user_id":    v["user_id"],
+                "type":       v["type"],
+                "opened_at":  datetime.fromisoformat(v["opened_at"]),
+                "number":     v.get("number", 0),
+                "claimed_by": v.get("claimed_by"),
             }
-            for k, v in raw.items()
-        }
+        return result
     except Exception:
         return {}
 
@@ -92,14 +95,32 @@ def _load_tickets() -> dict:
 def _save_tickets(tickets: dict) -> None:
     serializable = {
         str(ch_id): {
-            "user_id":   d["user_id"],
-            "type":      d["type"],
-            "opened_at": d["opened_at"].isoformat(),
+            "user_id":    d["user_id"],
+            "type":       d["type"],
+            "opened_at":  d["opened_at"].isoformat(),
+            "number":     d.get("number", 0),
+            "claimed_by": d.get("claimed_by"),
         }
         for ch_id, d in tickets.items()
     }
     with open(TICKETS_FILE, "w", encoding="utf-8") as f:
         json.dump(serializable, f, ensure_ascii=False, indent=2)
+
+
+COUNTER_FILE = "ticket_counter.json"
+
+
+def _next_ticket_number() -> int:
+    count = 1
+    if os.path.exists(COUNTER_FILE):
+        try:
+            with open(COUNTER_FILE, "r", encoding="utf-8") as f:
+                count = json.load(f).get("count", 0) + 1
+        except Exception:
+            count = 1
+    with open(COUNTER_FILE, "w", encoding="utf-8") as f:
+        json.dump({"count": count}, f)
+    return count
 
 
 open_tickets: dict = _load_tickets()
@@ -115,43 +136,374 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  GÉNÉRATION DE TRANSCRIPTION
+#  GÉNÉRATION DE TRANSCRIPTION HTML
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def generate_transcript(channel: discord.TextChannel) -> discord.File:
-    now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S UTC")
-    lines = [
-        "═══════════════════════════════════════════════════",
-        "       DELTA SOLUTIONS — Transcription ticket",
-        f"  Salon   : #{channel.name}",
-        f"  Généré  : {now}",
-        "═══════════════════════════════════════════════════\n",
-    ]
+def _format_duration(delta: timedelta) -> str:
+    total = int(delta.total_seconds())
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        m, s = divmod(total, 60)
+        return f"{m}m {s}s"
+    h, rem = divmod(total, 3600)
+    m, s   = divmod(rem, 60)
+    return f"{h}h {m}m {s}s"
 
-    async for msg in channel.history(limit=1000, oldest_first=True):
-        ts      = msg.created_at.strftime("%d/%m/%Y %H:%M:%S")
-        content = msg.content or ""
-        for embed in msg.embeds:
-            if embed.title:
-                content += f" [EMBED: {embed.title}]"
-            if embed.description:
-                content += f" — {embed.description[:120]}"
+
+async def generate_transcript(
+    channel: discord.TextChannel,
+    ticket: dict | None = None,
+) -> tuple[discord.File, int]:
+    """Returns (discord.File HTML transcript, message_count)."""
+
+    messages = []
+    async for msg in channel.history(limit=2000, oldest_first=True):
+        messages.append(msg)
+
+    opened_at = ticket["opened_at"].strftime("%d/%m/%Y %H:%M:%S UTC") if ticket else "N/A"
+    now_str   = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S UTC")
+    category  = TICKET_CONFIG.get(ticket["type"], {}) if ticket else {}
+    cat_label = f"{category.get('emoji', '')} {category.get('label', 'N/A')}" if category else "N/A"
+    user_name = f"<@{ticket['user_id']}>" if ticket else "N/A"
+
+    # Build message rows HTML
+    rows = []
+    for msg in messages:
+        if msg.author.bot and not msg.content and not msg.embeds:
+            continue
+        ts      = msg.created_at.strftime("%d/%m/%Y %H:%M")
+        avatar  = str(msg.author.display_avatar.with_size(64).url)
+        name    = html.escape(msg.author.display_name)
+        is_bot  = msg.author.bot
+        badge   = '<span class="badge">BOT</span>' if is_bot else ""
+        content_parts = []
+        if msg.content:
+            content_parts.append(f'<p>{html.escape(msg.content)}</p>')
+        for emb in msg.embeds:
+            title = html.escape(emb.title or "")
+            desc  = html.escape(emb.description or "")[:300]
+            content_parts.append(
+                f'<div class="embed" style="border-left:4px solid #{emb.color.value:06x if emb.color else "5865F2"}">'
+                f'{"<strong>" + title + "</strong><br>" if title else ""}'
+                f'{desc}</div>'
+            )
         for att in msg.attachments:
-            content += f" [FICHIER: {att.url}]"
-        lines.append(f"[{ts}] {msg.author.display_name} ({msg.author.id}): {content}")
+            if att.content_type and att.content_type.startswith("image"):
+                content_parts.append(f'<img class="attachment" src="{att.url}" alt="attachment">')
+            else:
+                content_parts.append(f'<a class="file-link" href="{att.url}">{html.escape(att.filename)}</a>')
+        content_html = "\n".join(content_parts) if content_parts else '<p class="empty">[message vide]</p>'
 
-    raw = "\n".join(lines).encode("utf-8")
-    return discord.File(io.BytesIO(raw), filename=f"transcript-{channel.name}.txt")
+        rows.append(f"""
+        <div class="message">
+          <img class="avatar" src="{avatar}" alt="">
+          <div class="msg-body">
+            <div class="msg-header">
+              <span class="username {'bot-name' if is_bot else ''}">{name}</span>
+              {badge}
+              <span class="timestamp">{ts}</span>
+            </div>
+            <div class="msg-content">{content_html}</div>
+          </div>
+        </div>""")
+
+    rows_html = "\n".join(rows)
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>Transcript — {html.escape(channel.name)}</title>
+  <style>
+    :root {{
+      --bg:        #1e1f22;
+      --bg2:       #2b2d31;
+      --bg3:       #313338;
+      --accent:    #5865F2;
+      --text:      #dcddde;
+      --muted:     #949ba4;
+      --border:    #3f4147;
+      --bot-color: #5865F2;
+      --success:   #57F287;
+    }}
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'gg sans', 'Noto Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }}
+    .header {{
+      background: var(--bg2);
+      border-bottom: 1px solid var(--border);
+      padding: 20px 30px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }}
+    .header-icon {{
+      width: 48px; height: 48px;
+      border-radius: 50%;
+      background: var(--accent);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 22px; flex-shrink: 0;
+    }}
+    .header-info h1 {{ font-size: 18px; font-weight: 700; color: #fff; }}
+    .header-info p  {{ font-size: 13px; color: var(--muted); margin-top: 2px; }}
+    .meta-bar {{
+      background: var(--bg3);
+      padding: 14px 30px;
+      display: flex; flex-wrap: wrap; gap: 24px;
+      border-bottom: 1px solid var(--border);
+    }}
+    .meta-item {{ display: flex; flex-direction: column; gap: 2px; }}
+    .meta-label {{ font-size: 11px; font-weight: 600; text-transform: uppercase;
+                   letter-spacing: .5px; color: var(--muted); }}
+    .meta-value {{ font-size: 14px; color: var(--text); }}
+    .messages {{
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 20px 30px;
+    }}
+    .message {{
+      display: flex;
+      gap: 14px;
+      padding: 6px 0;
+      border-radius: 4px;
+      transition: background .1s;
+    }}
+    .message:hover {{ background: rgba(255,255,255,.03); }}
+    .avatar {{
+      width: 40px; height: 40px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }}
+    .msg-body {{ flex: 1; min-width: 0; }}
+    .msg-header {{ display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }}
+    .username {{ font-weight: 600; color: #fff; }}
+    .bot-name {{ color: var(--bot-color); }}
+    .badge {{
+      background: var(--bot-color);
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 5px;
+      border-radius: 3px;
+      letter-spacing: .3px;
+    }}
+    .timestamp {{ font-size: 11px; color: var(--muted); }}
+    .msg-content p {{ color: var(--text); margin: 1px 0; word-break: break-word; }}
+    .msg-content .empty {{ color: var(--muted); font-style: italic; }}
+    .embed {{
+      margin-top: 6px;
+      background: var(--bg2);
+      border-radius: 4px;
+      padding: 10px 14px;
+      max-width: 520px;
+      font-size: 13px;
+      color: var(--text);
+    }}
+    .attachment {{
+      max-width: 400px;
+      border-radius: 6px;
+      margin-top: 6px;
+    }}
+    .file-link {{
+      display: inline-block;
+      margin-top: 6px;
+      color: var(--accent);
+      text-decoration: none;
+    }}
+    .file-link:hover {{ text-decoration: underline; }}
+    .footer {{
+      text-align: center;
+      padding: 20px;
+      color: var(--muted);
+      font-size: 12px;
+      border-top: 1px solid var(--border);
+    }}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="header-icon">🎟️</div>
+    <div class="header-info">
+      <h1>#{html.escape(channel.name)}</h1>
+      <p>Delta Solutions — Transcription de ticket</p>
+    </div>
+  </div>
+  <div class="meta-bar">
+    <div class="meta-item">
+      <span class="meta-label">Utilisateur</span>
+      <span class="meta-value">{html.escape(str(ticket['user_id']) if ticket else 'N/A')}</span>
+    </div>
+    <div class="meta-item">
+      <span class="meta-label">Catégorie</span>
+      <span class="meta-value">{html.escape(cat_label)}</span>
+    </div>
+    <div class="meta-item">
+      <span class="meta-label">Ouvert le</span>
+      <span class="meta-value">{html.escape(opened_at)}</span>
+    </div>
+    <div class="meta-item">
+      <span class="meta-label">Généré le</span>
+      <span class="meta-value">{html.escape(now_str)}</span>
+    </div>
+    <div class="meta-item">
+      <span class="meta-label">Messages</span>
+      <span class="meta-value">{len(messages)}</span>
+    </div>
+  </div>
+  <div class="messages">
+    {rows_html}
+  </div>
+  <div class="footer">Delta Solutions Ticket System — transcript généré automatiquement</div>
+</body>
+</html>"""
+
+    file = discord.File(
+        io.BytesIO(html_content.encode("utf-8")),
+        filename=f"transcript-{channel.name}.html",
+    )
+    return file, len(messages)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  MODAL : RAISON DE FERMETURE
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CloseReasonModal(discord.ui.Modal, title="Fermer le ticket"):
+    reason = discord.ui.TextInput(
+        label="Raison de fermeture (optionnel)",
+        placeholder="Ex : Problème résolu, demande traitée…",
+        required=False,
+        max_length=300,
+        style=discord.TextStyle.short,
+    )
+
+    def __init__(self, channel: discord.TextChannel, invoker: discord.Member):
+        super().__init__()
+        self._channel = channel
+        self._invoker = invoker
+
+    async def on_submit(self, interaction: discord.Interaction):
+        reason_text = self.reason.value.strip() or "Aucune raison fournie"
+        await interaction.response.send_message(
+            f"🔒 Fermeture en cours… (**{reason_text}**)", ephemeral=True
+        )
+        await _do_close(self._channel, self._invoker, reason_text)
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  LOGIQUE DE FERMETURE (partagée entre bouton et modal)
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _do_close(channel: discord.TextChannel, closer: discord.Member, reason: str):
+    ticket   = open_tickets.get(channel.id)
+    now      = datetime.now(timezone.utc)
+
+    # Transcription HTML
+    transcript, msg_count = await generate_transcript(channel, ticket)
+
+    log_channel = channel.guild.get_channel(LOG_CHANNEL_ID)
+    if log_channel:
+        if ticket:
+            config   = TICKET_CONFIG.get(ticket["type"], {})
+            duration = _format_duration(now - ticket["opened_at"]) if ticket.get("opened_at") else "N/A"
+            claimed  = f"<@{ticket['claimed_by']}>" if ticket.get("claimed_by") else "Non réclamé"
+
+            log_embed = discord.Embed(
+                title="🔒 Ticket Fermé",
+                color=config.get("color", 0xFF0000),
+                timestamp=now,
+            )
+            log_embed.set_author(
+                name=f"Ticket #{ticket.get('number', '?')} — {config.get('label', 'N/A')}",
+                icon_url=channel.guild.icon.url if channel.guild.icon else discord.Embed.Empty,
+            )
+            # Fetch user avatar for thumbnail
+            user = channel.guild.get_member(ticket["user_id"])
+            if user:
+                log_embed.set_thumbnail(url=user.display_avatar.url)
+
+            log_embed.add_field(name="👤 Utilisateur",  value=f"<@{ticket['user_id']}>", inline=True)
+            log_embed.add_field(name="📂 Catégorie",    value=f"{config.get('emoji','')} {config.get('label','N/A')}", inline=True)
+            log_embed.add_field(name="🙋 Pris en charge", value=claimed, inline=True)
+            log_embed.add_field(name="🔒 Fermé par",    value=closer.mention, inline=True)
+            log_embed.add_field(name="⏱️ Durée",        value=duration, inline=True)
+            log_embed.add_field(name="💬 Messages",     value=str(msg_count), inline=True)
+            log_embed.add_field(name="📅 Ouvert le",    value=f"<t:{int(ticket['opened_at'].timestamp())}:f>", inline=True)
+            log_embed.add_field(name="📅 Fermé le",     value=f"<t:{int(now.timestamp())}:f>", inline=True)
+            log_embed.add_field(name="📝 Raison",       value=reason, inline=False)
+            log_embed.set_footer(text="Delta Solutions — Ticket Logs")
+        else:
+            log_embed = discord.Embed(
+                title="🔒 Ticket Fermé",
+                description=f"Salon : `{channel.name}`\nFermé par {closer.mention}\nRaison : {reason}",
+                color=0xFF0000,
+                timestamp=now,
+            )
+            log_embed.set_footer(text="Delta Solutions — Ticket Logs")
+
+        await log_channel.send(embed=log_embed, file=transcript)
+
+    open_tickets.pop(channel.id, None)
+    _save_tickets(open_tickets)
+
+    await channel.send("🔒 Ce ticket sera supprimé dans **5 secondes**…")
+    await asyncio.sleep(5)
+    await channel.delete(reason=f"Ticket fermé par {closer} — {reason}")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  VIEW : BOUTONS DU TICKET (persistants)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TicketControlView(discord.ui.View):
-    """Boutons Notify et Fermer le ticket — persistants après redémarrage."""
+    """Boutons Claim, Notify et Fermer le ticket — persistants après redémarrage."""
 
     def __init__(self):
         super().__init__(timeout=None)
+
+    # ── ✋ Claim ────────────────────────────────────────────────────────────
+    @discord.ui.button(
+        label="Claim",
+        emoji="✋",
+        style=discord.ButtonStyle.primary,
+        custom_id="ds_ticket_claim",
+    )
+    async def claim(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ticket = open_tickets.get(interaction.channel.id)
+        if not ticket:
+            await interaction.response.send_message(
+                "❌ Données du ticket introuvables.", ephemeral=True
+            )
+            return
+
+        if ticket.get("claimed_by"):
+            claimer = interaction.guild.get_member(ticket["claimed_by"])
+            name    = claimer.display_name if claimer else f"<@{ticket['claimed_by']}>"
+            await interaction.response.send_message(
+                f"❌ Ce ticket est déjà pris en charge par **{name}**.", ephemeral=True
+            )
+            return
+
+        ticket["claimed_by"] = interaction.user.id
+        _save_tickets(open_tickets)
+
+        config = TICKET_CONFIG.get(ticket["type"], {})
+        embed  = discord.Embed(
+            description=f"✋ **{interaction.user.display_name}** a pris en charge ce ticket.",
+            color=config.get("color", 0x5865F2),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_author(
+            name=interaction.user.display_name,
+            icon_url=interaction.user.display_avatar.url,
+        )
+        await interaction.response.send_message(embed=embed)
 
     # ── 🔔 Notify ──────────────────────────────────────────────────────────
     @discord.ui.button(
@@ -176,7 +528,7 @@ class TicketControlView(discord.ui.View):
             return
 
         config = TICKET_CONFIG[ticket["type"]]
-        embed = discord.Embed(
+        embed  = discord.Embed(
             title="📬 Nouvelle réponse — Delta Solutions",
             description=(
                 f"Hey {member.mention}, un membre du staff a répondu à ton ticket !\n\n"
@@ -208,68 +560,8 @@ class TicketControlView(discord.ui.View):
         custom_id="ds_ticket_close",
     )
     async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
-        channel = interaction.channel
-        ticket  = open_tickets.get(channel.id)
-
-        await interaction.response.defer()
-
-        # Génération de la transcription
-        transcript = await generate_transcript(channel)
-
-        # Envoi dans le salon de logs
-        log_channel = interaction.guild.get_channel(LOG_CHANNEL_ID)
-        if log_channel:
-            if ticket:
-                config = TICKET_CONFIG.get(ticket["type"], {})
-                log_embed = discord.Embed(
-                    title="🔒 Ticket Fermé",
-                    color=config.get("color", 0xFF0000),
-                    timestamp=datetime.now(timezone.utc),
-                )
-                log_embed.add_field(
-                    name="👤 Utilisateur",
-                    value=f"<@{ticket['user_id']}>",
-                    inline=True,
-                )
-                log_embed.add_field(
-                    name="📂 Catégorie",
-                    value=f"{config.get('emoji', '')} {config.get('label', 'N/A')}",
-                    inline=True,
-                )
-                log_embed.add_field(
-                    name="🔒 Fermé par",
-                    value=interaction.user.mention,
-                    inline=True,
-                )
-                log_embed.add_field(
-                    name="📅 Ouvert le",
-                    value=ticket["opened_at"].strftime("%d/%m/%Y %H:%M:%S"),
-                    inline=True,
-                )
-                log_embed.add_field(
-                    name="📅 Fermé le",
-                    value=datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S"),
-                    inline=True,
-                )
-                log_embed.set_footer(text="Delta Solutions — Ticket Logs")
-            else:
-                log_embed = discord.Embed(
-                    title="🔒 Ticket Fermé",
-                    description=f"Salon : `{channel.name}`\nFermé par {interaction.user.mention}",
-                    color=0xFF0000,
-                    timestamp=datetime.now(timezone.utc),
-                )
-                log_embed.set_footer(text="Delta Solutions — Ticket Logs")
-
-            await log_channel.send(embed=log_embed, file=transcript)
-
-        # Suppression des données de persistance
-        open_tickets.pop(channel.id, None)
-        _save_tickets(open_tickets)
-
-        await channel.send("🔒 Ce ticket sera supprimé dans **5 secondes**…")
-        await asyncio.sleep(5)
-        await channel.delete(reason=f"Ticket fermé par {interaction.user}")
+        modal = CloseReasonModal(channel=interaction.channel, invoker=interaction.user)
+        await interaction.response.send_modal(modal)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  VIEW : PANEL PRINCIPAL (dropdown + persistant)
@@ -341,7 +633,7 @@ class TicketSelect(discord.ui.Select):
             )
 
         channel_name = (
-            f"ticket-{config['label'].lower().replace(' ', '-')}-{user.name.lower()}"
+            f"ticket-{ticket_number:04d}-{config['label'].lower().replace(' ', '-')}"
         )
         channel = await guild.create_text_channel(
             name=channel_name,
@@ -350,11 +642,14 @@ class TicketSelect(discord.ui.Select):
             reason=f"Ticket {config['label']} ouvert par {user}",
         )
 
-        opened_at = datetime.now(timezone.utc)
+        opened_at    = datetime.now(timezone.utc)
+        ticket_number = _next_ticket_number()
         open_tickets[channel.id] = {
-            "user_id":   user.id,
-            "type":      key,
-            "opened_at": opened_at,
+            "user_id":    user.id,
+            "type":       key,
+            "opened_at":  opened_at,
+            "number":     ticket_number,
+            "claimed_by": None,
         }
         _save_tickets(open_tickets)
 
@@ -377,9 +672,10 @@ class TicketSelect(discord.ui.Select):
             ),
             inline=False,
         )
-        embed.add_field(name="👤 Utilisateur", value=user.mention,                                    inline=True)
-        embed.add_field(name="📂 Catégorie",   value=f"{config['emoji']} {config['label']}",          inline=True)
-        embed.add_field(name="📅 Ouvert",      value=f"<t:{int(opened_at.timestamp())}:R>",           inline=True)
+        embed.add_field(name="👤 Utilisateur",  value=user.mention,                                   inline=True)
+        embed.add_field(name="📂 Catégorie",    value=f"{config['emoji']} {config['label']}",         inline=True)
+        embed.add_field(name="🔢 Ticket n°",    value=f"`#{ticket_number:04d}`",                      inline=True)
+        embed.add_field(name="📅 Ouvert",       value=f"<t:{int(opened_at.timestamp())}:R>",          inline=True)
         embed.set_thumbnail(url=user.display_avatar.url)
         embed.set_footer(text="Delta Solutions — Support System")
         if BANNER_URL:
@@ -402,6 +698,14 @@ class TicketPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(TicketSelect())
+
+# Rôle autorisé à utiliser les commandes staff
+STAFF_ROLE_ID = 1479606906308919387
+
+
+def _has_staff_role(interaction: discord.Interaction) -> bool:
+    return any(r.id == STAFF_ROLE_ID for r in interaction.user.roles)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  COMMANDE /setup
@@ -446,6 +750,174 @@ async def setup_error(interaction: discord.Interaction, error: app_commands.AppC
             "❌ Tu dois être **administrateur** pour utiliser cette commande.",
             ephemeral=True,
         )
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  COMMANDE /adduser
+# ─────────────────────────────────────────────────────────────────────────────
+
+@bot.tree.command(
+    name="adduser",
+    description="Ajouter un utilisateur au ticket actuel",
+)
+@app_commands.describe(member="Le membre à ajouter au ticket")
+async def adduser(interaction: discord.Interaction, member: discord.Member):
+    if not _has_staff_role(interaction):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+
+    if interaction.channel.id not in open_tickets:
+        await interaction.response.send_message(
+            "❌ Cette commande doit être utilisée dans un salon de ticket.", ephemeral=True
+        )
+        return
+
+    await interaction.channel.set_permissions(
+        member,
+        view_channel=True,
+        send_messages=True,
+        read_message_history=True,
+        attach_files=True,
+        embed_links=True,
+    )
+
+    embed = discord.Embed(
+        description=f"✅ {member.mention} a été ajouté au ticket par {interaction.user.mention}.",
+        color=0x57F287,
+        timestamp=datetime.now(timezone.utc),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  COMMANDE /removeuser
+# ─────────────────────────────────────────────────────────────────────────────
+
+@bot.tree.command(
+    name="removeuser",
+    description="Retirer un utilisateur du ticket actuel",
+)
+@app_commands.describe(member="Le membre à retirer du ticket")
+async def removeuser(interaction: discord.Interaction, member: discord.Member):
+    if not _has_staff_role(interaction):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+
+    ticket = open_tickets.get(interaction.channel.id)
+    if not ticket:
+        await interaction.response.send_message(
+            "❌ Cette commande doit être utilisée dans un salon de ticket.", ephemeral=True
+        )
+        return
+
+    if member.id == ticket["user_id"]:
+        await interaction.response.send_message(
+            "❌ Impossible de retirer le créateur du ticket.", ephemeral=True
+        )
+        return
+
+    await interaction.channel.set_permissions(member, overwrite=None)
+
+    embed = discord.Embed(
+        description=f"🚫 {member.mention} a été retiré du ticket par {interaction.user.mention}.",
+        color=0xED4245,
+        timestamp=datetime.now(timezone.utc),
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  COMMANDE /closeall
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ConfirmCloseAllView(discord.ui.View):
+    def __init__(self, invoker_id: int):
+        super().__init__(timeout=30)
+        self.invoker_id = invoker_id
+
+    @discord.ui.button(label="Confirmer", style=discord.ButtonStyle.danger, emoji="🗑️")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.invoker_id:
+            await interaction.response.send_message(
+                "❌ Seul l'auteur de la commande peut confirmer.", ephemeral=True
+            )
+            return
+
+        self.stop()
+        await interaction.response.edit_message(
+            content="⏳ Fermeture de tous les tickets en cours…", view=None
+        )
+
+        guild           = interaction.guild
+        ticket_ids      = list(open_tickets.keys())
+        closed, failed  = 0, 0
+
+        for ch_id in ticket_ids:
+            channel = guild.get_channel(ch_id)
+            if channel:
+                try:
+                    open_tickets.pop(ch_id, None)
+                    await channel.delete(reason=f"Closeall par {interaction.user}")
+                    closed += 1
+                except Exception:
+                    failed += 1
+            else:
+                open_tickets.pop(ch_id, None)
+
+        _save_tickets(open_tickets)
+
+        log_channel = guild.get_channel(LOG_CHANNEL_ID)
+        if log_channel:
+            log_embed = discord.Embed(
+                title="🗑️ Fermeture massive de tickets",
+                description=(
+                    f"**{closed}** ticket(s) supprimé(s)\n"
+                    f"**{failed}** échec(s)\n\n"
+                    f"Exécuté par {interaction.user.mention}"
+                ),
+                color=0xED4245,
+                timestamp=datetime.now(timezone.utc),
+            )
+            log_embed.set_footer(text="Delta Solutions — Ticket Logs")
+            await log_channel.send(embed=log_embed)
+
+        await interaction.followup.send(
+            f"✅ **{closed}** ticket(s) fermé(s){f', {failed} erreur(s)' if failed else ''}.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary, emoji="✖️")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(content="❌ Annulé.", view=None)
+
+
+@bot.tree.command(
+    name="closeall",
+    description="Fermer et supprimer TOUS les tickets ouverts",
+)
+async def closeall(interaction: discord.Interaction):
+    if not _has_staff_role(interaction):
+        await interaction.response.send_message(
+            "❌ Tu n'as pas la permission d'utiliser cette commande.", ephemeral=True
+        )
+        return
+
+    count = len(open_tickets)
+    if count == 0:
+        await interaction.response.send_message(
+            "ℹ️ Aucun ticket ouvert en ce moment.", ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"⚠️ Tu es sur le point de fermer **{count}** ticket(s). Cette action est **irréversible**.",
+        view=ConfirmCloseAllView(invoker_id=interaction.user.id),
+        ephemeral=True,
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  ÉVÉNEMENTS DU BOT
