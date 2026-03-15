@@ -16,7 +16,6 @@ import os
 import asyncio
 import json
 import io
-import html
 from datetime import datetime, timezone, timedelta
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -162,219 +161,65 @@ async def generate_transcript(
     channel: discord.TextChannel,
     ticket: dict | None = None,
 ) -> tuple[discord.File, int]:
-    """Returns (discord.File HTML transcript, message_count)."""
+    """Returns (discord.File TXT transcript, message_count)."""
 
     messages = []
     async for msg in channel.history(limit=2000, oldest_first=True):
         messages.append(msg)
 
-    opened_at = ticket["opened_at"].strftime("%d/%m/%Y %H:%M:%S UTC") if ticket else "N/A"
     now_str   = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S UTC")
+    opened_at = ticket["opened_at"].strftime("%d/%m/%Y %H:%M:%S UTC") if ticket else "N/A"
     category  = TICKET_CONFIG.get(ticket["type"], {}) if ticket else {}
-    cat_label = f"{category.get('emoji', '')} {category.get('label', 'N/A')}" if category else "N/A"
-    user_name = f"<@{ticket['user_id']}>" if ticket else "N/A"
+    cat_label = f"{category.get('label', 'N/A')}" if category else "N/A"
 
-    # Build message rows HTML
-    rows = []
+    sep  = "═" * 60
+    sep2 = "─" * 60
+
+    lines = [
+        sep,
+        "       DELTA SOLUTIONS — Ticket Transcript",
+        sep,
+        f"  Channel  : #{channel.name}",
+        f"  Category : {cat_label}",
+        f"  User     : {ticket['user_id'] if ticket else 'N/A'}",
+        f"  Opened   : {opened_at}",
+        f"  Exported : {now_str}",
+        sep,
+        "",
+    ]
+
     for msg in messages:
-        if msg.author.bot and not msg.content and not msg.embeds:
+        # Skip empty bot system messages
+        if msg.author.bot and not msg.content and not msg.embeds and not msg.attachments:
             continue
-        ts      = msg.created_at.strftime("%d/%m/%Y %H:%M")
-        avatar  = str(msg.author.display_avatar.with_size(64).url)
-        name    = html.escape(msg.author.display_name)
-        is_bot  = msg.author.bot
-        badge   = '<span class="badge">BOT</span>' if is_bot else ""
-        content_parts = []
+
+        ts     = msg.created_at.strftime("%d/%m/%Y %H:%M:%S")
+        author = f"{msg.author.display_name}{'  [BOT]' if msg.author.bot else ''}"
+        lines.append(f"[{ts}]  {author}")
+
         if msg.content:
-            content_parts.append(f'<p>{html.escape(msg.content)}</p>')
+            for text_line in msg.content.splitlines():
+                lines.append(f"    {text_line}")
+
         for emb in msg.embeds:
-            title      = html.escape(emb.title or "")
-            desc       = html.escape(emb.description or "")[:300]
-            emb_color  = f"{emb.color.value:06x}" if emb.color else "5865F2"
-            content_parts.append(
-                f'<div class="embed" style="border-left:4px solid #{emb_color}">'
-                f'{"<strong>" + title + "</strong><br>" if title else ""}'
-                f'{desc}</div>'
-            )
+            if emb.title:
+                lines.append(f"    [Embed] {emb.title}")
+            if emb.description:
+                short = emb.description[:300].replace("\n", " ")
+                lines.append(f"    {short}")
+
         for att in msg.attachments:
-            if att.content_type and att.content_type.startswith("image"):
-                content_parts.append(f'<img class="attachment" src="{att.url}" alt="attachment">')
-            else:
-                content_parts.append(f'<a class="file-link" href="{att.url}">{html.escape(att.filename)}</a>')
-        content_html = "\n".join(content_parts) if content_parts else '<p class="empty">[message vide]</p>'
+            lines.append(f"    [Attachment] {att.url}")
 
-        rows.append(f"""
-        <div class="message">
-          <img class="avatar" src="{avatar}" alt="">
-          <div class="msg-body">
-            <div class="msg-header">
-              <span class="username {'bot-name' if is_bot else ''}">{name}</span>
-              {badge}
-              <span class="timestamp">{ts}</span>
-            </div>
-            <div class="msg-content">{content_html}</div>
-          </div>
-        </div>""")
+        lines.append(sep2)
 
-    rows_html = "\n".join(rows)
+    lines.append("")
+    lines.append("Delta Solutions Ticket System — auto-generated transcript")
 
-    html_content = f"""<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8">
-  <title>Transcript — {html.escape(channel.name)}</title>
-  <style>
-    :root {{
-      --bg:        #1e1f22;
-      --bg2:       #2b2d31;
-      --bg3:       #313338;
-      --accent:    #5865F2;
-      --text:      #dcddde;
-      --muted:     #949ba4;
-      --border:    #3f4147;
-      --bot-color: #5865F2;
-      --success:   #57F287;
-    }}
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
-      background: var(--bg);
-      color: var(--text);
-      font-family: 'gg sans', 'Noto Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif;
-      font-size: 14px;
-      line-height: 1.5;
-    }}
-    .header {{
-      background: var(--bg2);
-      border-bottom: 1px solid var(--border);
-      padding: 20px 30px;
-      display: flex;
-      align-items: center;
-      gap: 16px;
-    }}
-    .header-icon {{
-      width: 48px; height: 48px;
-      border-radius: 50%;
-      background: var(--accent);
-      display: flex; align-items: center; justify-content: center;
-      font-size: 22px; flex-shrink: 0;
-    }}
-    .header-info h1 {{ font-size: 18px; font-weight: 700; color: #fff; }}
-    .header-info p  {{ font-size: 13px; color: var(--muted); margin-top: 2px; }}
-    .meta-bar {{
-      background: var(--bg3);
-      padding: 14px 30px;
-      display: flex; flex-wrap: wrap; gap: 24px;
-      border-bottom: 1px solid var(--border);
-    }}
-    .meta-item {{ display: flex; flex-direction: column; gap: 2px; }}
-    .meta-label {{ font-size: 11px; font-weight: 600; text-transform: uppercase;
-                   letter-spacing: .5px; color: var(--muted); }}
-    .meta-value {{ font-size: 14px; color: var(--text); }}
-    .messages {{
-      max-width: 1000px;
-      margin: 0 auto;
-      padding: 20px 30px;
-    }}
-    .message {{
-      display: flex;
-      gap: 14px;
-      padding: 6px 0;
-      border-radius: 4px;
-      transition: background .1s;
-    }}
-    .message:hover {{ background: rgba(255,255,255,.03); }}
-    .avatar {{
-      width: 40px; height: 40px;
-      border-radius: 50%;
-      flex-shrink: 0;
-      margin-top: 2px;
-    }}
-    .msg-body {{ flex: 1; min-width: 0; }}
-    .msg-header {{ display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }}
-    .username {{ font-weight: 600; color: #fff; }}
-    .bot-name {{ color: var(--bot-color); }}
-    .badge {{
-      background: var(--bot-color);
-      color: #fff;
-      font-size: 10px;
-      font-weight: 700;
-      padding: 1px 5px;
-      border-radius: 3px;
-      letter-spacing: .3px;
-    }}
-    .timestamp {{ font-size: 11px; color: var(--muted); }}
-    .msg-content p {{ color: var(--text); margin: 1px 0; word-break: break-word; }}
-    .msg-content .empty {{ color: var(--muted); font-style: italic; }}
-    .embed {{
-      margin-top: 6px;
-      background: var(--bg2);
-      border-radius: 4px;
-      padding: 10px 14px;
-      max-width: 520px;
-      font-size: 13px;
-      color: var(--text);
-    }}
-    .attachment {{
-      max-width: 400px;
-      border-radius: 6px;
-      margin-top: 6px;
-    }}
-    .file-link {{
-      display: inline-block;
-      margin-top: 6px;
-      color: var(--accent);
-      text-decoration: none;
-    }}
-    .file-link:hover {{ text-decoration: underline; }}
-    .footer {{
-      text-align: center;
-      padding: 20px;
-      color: var(--muted);
-      font-size: 12px;
-      border-top: 1px solid var(--border);
-    }}
-  </style>
-</head>
-<body>
-  <div class="header">
-    <div class="header-icon">🎟️</div>
-    <div class="header-info">
-      <h1>#{html.escape(channel.name)}</h1>
-      <p>Delta Solutions — Transcription de ticket</p>
-    </div>
-  </div>
-  <div class="meta-bar">
-    <div class="meta-item">
-      <span class="meta-label">Utilisateur</span>
-      <span class="meta-value">{html.escape(str(ticket['user_id']) if ticket else 'N/A')}</span>
-    </div>
-    <div class="meta-item">
-      <span class="meta-label">Catégorie</span>
-      <span class="meta-value">{html.escape(cat_label)}</span>
-    </div>
-    <div class="meta-item">
-      <span class="meta-label">Ouvert le</span>
-      <span class="meta-value">{html.escape(opened_at)}</span>
-    </div>
-    <div class="meta-item">
-      <span class="meta-label">Généré le</span>
-      <span class="meta-value">{html.escape(now_str)}</span>
-    </div>
-    <div class="meta-item">
-      <span class="meta-label">Messages</span>
-      <span class="meta-value">{len(messages)}</span>
-    </div>
-  </div>
-  <div class="messages">
-    {rows_html}
-  </div>
-  <div class="footer">Delta Solutions Ticket System — transcript généré automatiquement</div>
-</body>
-</html>"""
-
+    raw = "\n".join(lines).encode("utf-8")
     file = discord.File(
-        io.BytesIO(html_content.encode("utf-8")),
-        filename=f"transcript-{channel.name}.html",
+        io.BytesIO(raw),
+        filename=f"transcript-{channel.name}.txt",
     )
     return file, len(messages)
 
