@@ -257,8 +257,9 @@ async def _do_close(channel: discord.TextChannel, closer: discord.Member, reason
     ticket   = open_tickets.get(channel.id)
     now      = datetime.now(timezone.utc)
 
-    # Transcription HTML
-    transcript, msg_count = await generate_transcript(channel, ticket)
+    # Generate transcript twice (discord.File is single-use)
+    transcript_log, msg_count = await generate_transcript(channel, ticket)
+    transcript_dm,  _         = await generate_transcript(channel, ticket)
 
     log_channel = channel.guild.get_channel(LOG_CHANNEL_ID)
     if log_channel:
@@ -300,7 +301,31 @@ async def _do_close(channel: discord.TextChannel, closer: discord.Member, reason
             )
             log_embed.set_footer(text="Delta Solutions — Ticket Logs")
 
-        await log_channel.send(embed=log_embed, file=transcript)
+        await log_channel.send(embed=log_embed, file=transcript_log)
+
+    # Send transcript DM to the ticket creator
+    if ticket:
+        ticket_user = channel.guild.get_member(ticket["user_id"])
+        if ticket_user:
+            config = TICKET_CONFIG.get(ticket["type"], {})
+            dm_embed = discord.Embed(
+                title="🔒 Your ticket has been closed",
+                description=(
+                    f"Your **{config.get('label', '')}** ticket (`#{ticket.get('number', '?'):04d}`) "
+                    f"has been closed.\n\n"
+                    f"📝 **Reason:** {reason}\n\n"
+                    f"The transcript of your conversation is attached below."
+                ),
+                color=config.get("color", 0x5865F2),
+                timestamp=now,
+            )
+            dm_embed.set_footer(text="Delta Solutions — Support System")
+            if BANNER_URL:
+                dm_embed.set_image(url=BANNER_URL)
+            try:
+                await ticket_user.send(embed=dm_embed, file=transcript_dm)
+            except discord.Forbidden:
+                pass  # User has DMs disabled — silently skip
 
     open_tickets.pop(channel.id, None)
     _save_tickets(open_tickets)
