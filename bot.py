@@ -427,6 +427,12 @@ class TicketSelect(discord.ui.Select):
             custom_id="ds_ticket_select",
         )
 
+    async def _reply_ephemeral(self, interaction: discord.Interaction, content: str):
+        if interaction.response.is_done():
+            await interaction.followup.send(content, ephemeral=True)
+        else:
+            await interaction.response.send_message(content, ephemeral=True)
+
     async def callback(self, interaction: discord.Interaction):
         key    = self.values[0]
         config = TICKET_CONFIG[key]
@@ -435,10 +441,16 @@ class TicketSelect(discord.ui.Select):
 
         # Verrou anti-doublon : évite la race condition sur double-clic
         if user.id in _pending_users:
-            await interaction.response.send_message(
-                "⏳ Your ticket is already being created, please wait a moment…", ephemeral=True
+            await self._reply_ephemeral(
+                interaction,
+                "⏳ Your ticket is already being created, please wait a moment…",
             )
             return
+
+        # Ack immédiat pour éviter l'expiration de l'interaction (Unknown interaction)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
         _pending_users.add(user.id)
 
         try:
@@ -452,8 +464,9 @@ class TicketSelect(discord.ui.Select):
             if data["user_id"] == user.id:
                 ch = guild.get_channel(ch_id)
                 if ch:
-                    await interaction.response.send_message(
-                        f"❌ You already have an open ticket: {ch.mention}", ephemeral=True
+                    await self._reply_ephemeral(
+                        interaction,
+                        f"❌ You already have an open ticket: {ch.mention}",
                     )
                     return
                 else:
@@ -558,8 +571,9 @@ class TicketSelect(discord.ui.Select):
             view=TicketControlView(),
         )
 
-        await interaction.response.send_message(
-            f"✅ Your ticket has been created: {channel.mention}", ephemeral=True
+        await self._reply_ephemeral(
+            interaction,
+            f"✅ Your ticket has been created: {channel.mention}",
         )
 
 
@@ -568,12 +582,15 @@ class TicketPanelView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(TicketSelect())
 
-# Rôle autorisé à utiliser les commandes staff
-STAFF_ROLE_ID = 1479606906308919387
+# Seuls ces rôles peuvent utiliser les commandes du bot
+STAFF_ROLE_IDS = {
+    1480223587498725609,
+    1479941916911993087,
+}
 
 
 def _has_staff_role(interaction: discord.Interaction) -> bool:
-    return any(r.id == STAFF_ROLE_ID for r in interaction.user.roles)
+    return any(r.id in STAFF_ROLE_IDS for r in interaction.user.roles)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -584,8 +601,13 @@ def _has_staff_role(interaction: discord.Interaction) -> bool:
     name="setup",
     description="Deploy the Delta Solutions ticket panel in this channel",
 )
-@app_commands.checks.has_permissions(administrator=True)
 async def setup(interaction: discord.Interaction):
+    if not _has_staff_role(interaction):
+        await interaction.response.send_message(
+            "❌ You don't have permission to use this command.", ephemeral=True
+        )
+        return
+
     embed = discord.Embed(
         title="Hey, need help? 👋",
         description=(
@@ -610,15 +632,6 @@ async def setup(interaction: discord.Interaction):
 
     await interaction.channel.send(embed=embed, view=TicketPanelView())
     await interaction.response.send_message("✅ Ticket panel deployed!", ephemeral=True)
-
-
-@setup.error
-async def setup_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message(
-            "❌ You need to be an **administrator** to use this command.",
-            ephemeral=True,
-        )
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  COMMANDE /adduser
