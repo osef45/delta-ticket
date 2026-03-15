@@ -25,6 +25,9 @@ from datetime import datetime, timezone, timedelta
 TOKEN      = os.getenv("DISCORD_TOKEN")
 BANNER_URL = os.getenv("BANNER_URL", "")
 
+# Couleur unique des embeds (barre latérale Discord)
+EMBED_COLOR = 0xFF0000
+
 # Salon de logs (transcriptions)
 LOG_CHANNEL_ID = 1482544765114253365
 
@@ -34,7 +37,7 @@ TICKET_CONFIG = {
         "label":         "Support",
         "emoji":         "🛡️",
         "description":   "Something not working? We got you",
-        "color":         0x5865F2,
+        "color":         EMBED_COLOR,
         "role_id":       1479606906308919387,
         "open_msg":      "Having a general issue? Our support team is here to help you.",
         "category_name": "Support",
@@ -43,7 +46,7 @@ TICKET_CONFIG = {
         "label":         "Purchase",
         "emoji":         "🛒",
         "description":   "Question about an order or payment?",
-        "color":         0x57F287,
+        "color":         EMBED_COLOR,
         "role_id":       1479606902638776499,
         "open_msg":      "Got a question about an order or a payment? We're on it.",
         "category_name": "Purchase",
@@ -52,7 +55,7 @@ TICKET_CONFIG = {
         "label":         "Media",
         "emoji":         "📸",
         "description":   "Collab or media partnership request?",
-        "color":         0xEB459E,
+        "color":         EMBED_COLOR,
         "role_id":       1479606906308919387,
         "open_msg":      "Looking for a collab or media partnership? Tell us more.",
         "category_name": "Media",
@@ -61,7 +64,7 @@ TICKET_CONFIG = {
         "label":         "HWID Reset",
         "emoji":         "🔄",
         "description":   "Need your HWID reset?",
-        "color":         0xFEE75C,
+        "color":         EMBED_COLOR,
         "role_id":       1479606902638776499,
         "open_msg":      "Need a HWID reset? A staff member will assist you shortly.",
         "category_name": "HWID Reset",
@@ -270,7 +273,7 @@ async def _do_close(channel: discord.TextChannel, closer: discord.Member, reason
 
             log_embed = discord.Embed(
                 title="🔒 Ticket Closed",
-                color=config.get("color", 0xFF0000),
+                color=config.get("color", EMBED_COLOR),
                 timestamp=now,
             )
             log_embed.set_author(
@@ -296,7 +299,7 @@ async def _do_close(channel: discord.TextChannel, closer: discord.Member, reason
             log_embed = discord.Embed(
                 title="🔒 Ticket Closed",
                 description=f"Channel: `{channel.name}`\nClosed by {closer.mention}\nReason: {reason}",
-                color=0xFF0000,
+                color=EMBED_COLOR,
                 timestamp=now,
             )
             log_embed.set_footer(text="Delta Solutions — Ticket Logs")
@@ -316,7 +319,7 @@ async def _do_close(channel: discord.TextChannel, closer: discord.Member, reason
                     f"📝 **Reason:** {reason}\n\n"
                     f"The transcript of your conversation is attached below."
                 ),
-                color=config.get("color", 0x5865F2),
+                color=config.get("color", EMBED_COLOR),
                 timestamp=now,
             )
             dm_embed.set_footer(text="Delta Solutions — Support System")
@@ -599,7 +602,7 @@ async def setup(interaction: discord.Interaction):
             "Take a moment to make sure your question isn't already answered somewhere "
             "on the server. If not — go ahead, we don't bite 😄"
         ),
-        color=0x5865F2,
+        color=EMBED_COLOR,
     )
     embed.set_footer(text="Delta Solutions — Support System")
     if BANNER_URL:
@@ -650,7 +653,7 @@ async def adduser(interaction: discord.Interaction, member: discord.Member):
 
     embed = discord.Embed(
         description=f"✅ {member.mention} has been added to the ticket by {interaction.user.mention}.",
-        color=0x57F287,
+        color=EMBED_COLOR,
         timestamp=datetime.now(timezone.utc),
     )
     await interaction.response.send_message(embed=embed)
@@ -689,7 +692,7 @@ async def removeuser(interaction: discord.Interaction, member: discord.Member):
 
     embed = discord.Embed(
         description=f"🚫 {member.mention} has been removed from the ticket by {interaction.user.mention}.",
-        color=0xED4245,
+        color=EMBED_COLOR,
         timestamp=datetime.now(timezone.utc),
     )
     await interaction.response.send_message(embed=embed)
@@ -744,7 +747,7 @@ class ConfirmCloseAllView(discord.ui.View):
                     f"**{failed}** failure(s)\n\n"
                     f"Executed by {interaction.user.mention}"
                 ),
-                color=0xED4245,
+                color=EMBED_COLOR,
                 timestamp=datetime.now(timezone.utc),
             )
             log_embed.set_footer(text="Delta Solutions — Ticket Logs")
